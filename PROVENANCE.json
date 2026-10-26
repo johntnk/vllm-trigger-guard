@@ -1,0 +1,123 @@
+{
+  "upstream": {
+    "project": "vllm-project/vllm",
+    "version": "0.17.0",
+    "commit": "b31e9326a7d9394aab8c767f8ebe225c65594b60",
+    "license": "Apache-2.0"
+  },
+  "upstream_fix": {
+    "pr": "https://github.com/vllm-project/vllm/pull/34871",
+    "attribution": "Backport of the upstream GDN mixed-batch fix; not a new fix by this project."
+  },
+  "historical_evidence": "Pinned experiments; exported package GPU inference has not been rerun.",
+  "files": [
+    {
+      "path": "src/trigger_guard/core.py",
+      "original_sha256": "2e890926a37a0b87318088d140af2df1fdb1484fe10fd120fb53c3d96593927d",
+      "exported_sha256": "2e890926a37a0b87318088d140af2df1fdb1484fe10fd120fb53c3d96593927d",
+      "adaptation": "Unchanged source; LF line endings."
+    },
+    {
+      "path": "src/trigger_guard/egress.py",
+      "original_sha256": "116e9f18ac4b04ebd5886a614761d09425e7949a75377a7332d4e88139a93b0e",
+      "exported_sha256": "508d6f5aa524e1a23b9213f8501a064ae83690f1b19738dd84a8b9f86bdff1c2",
+      "adaptation": "Package-relative core import replaces vLLM/source-tree discovery; matching logic unchanged."
+    },
+    {
+      "path": "src/trigger_guard/protocol.py",
+      "original_sha256": "067e0b37bc8118042c673cb9a8d41a303e523cabb7066351f2e6405669b2278c",
+      "exported_sha256": "e066d3d778f1e2147f10553a081e9b92601f7b2573e851d76c0308568c63b95e",
+      "adaptation": "Package-relative import only."
+    },
+    {
+      "path": "src/trigger_guard/concurrency.py",
+      "original_sha256": "d58b5452354b951a930efe586232ffecf4efa789ffa4e52dd2c557ad3b842852",
+      "exported_sha256": "d58b5452354b951a930efe586232ffecf4efa789ffa4e52dd2c557ad3b842852",
+      "adaptation": "Unchanged source; LF line endings."
+    },
+    {
+      "path": "src/trigger_guard/server.py",
+      "original_sha256": "4e5b8052364e829d4603b988155a37e7e391ada0587ba1f8724cb0268d84a977",
+      "exported_sha256": "ec251ba59b16ae8dd9f687cf22902cdfef41f31e82a6c763a8e4e4fa7a570af8",
+      "adaptation": "Package-relative imports only; the bounded HTTP adapter is retained."
+    },
+    {
+      "path": "tests/reference_oracle.py",
+      "original_sha256": "481572f482c2e0706f853fc2600e5edb3e82637aac498ffe07a65f646222efc7",
+      "exported_sha256": "481572f482c2e0706f853fc2600e5edb3e82637aac498ffe07a65f646222efc7",
+      "adaptation": "Unchanged source; LF line endings."
+    },
+    {
+      "path": "benchmarks/reference_oracle.py",
+      "original_sha256": "481572f482c2e0706f853fc2600e5edb3e82637aac498ffe07a65f646222efc7",
+      "exported_sha256": "481572f482c2e0706f853fc2600e5edb3e82637aac498ffe07a65f646222efc7",
+      "adaptation": "Unchanged source; LF line endings."
+    },
+    {
+      "path": "benchmarks/build_corpora.py",
+      "original_sha256": "914c1c01935ffc3f12df663588ebaf002b74b81e9f97a099bb63c4d45fadad1d",
+      "exported_sha256": "914c1c01935ffc3f12df663588ebaf002b74b81e9f97a099bb63c4d45fadad1d",
+      "adaptation": "Unchanged source; LF line endings."
+    },
+    {
+      "path": "benchmarks/driver.py",
+      "original_sha256": "3c994a94a3afbc7fe4cc69d671f4d7283769b411e77db80998c3868a705f5f06",
+      "exported_sha256": "fa97ddf9407722fa7c9b13331f01b4db3150a9b002fdd970185b3e5eaa1e2f14",
+      "adaptation": "Package-relative oracle import only; loopback target restriction retained."
+    },
+    {
+      "path": "tests/test_matcher.py",
+      "original_sha256": "7c4aaa89225cdd8bc4272f15fab1b8f1fe7813d43d37e0cb80e5f594cd28659c",
+      "exported_sha256": "5a17180b67b3aa39f81039ddc1720201f1d7aa8aca79beb8052c43217e4f25e7",
+      "adaptation": "Imports point to the packaged core and egress modules."
+    },
+    {
+      "path": "tests/test_protocol.py",
+      "original_sha256": "bd99dc039e3ca74b139c627e8c1cf867871fafcfaa099beda947bc07ebfe4939",
+      "exported_sha256": "56d3f045a9cff54cab63b43fa161951d290b2340844e5d2b3c3b843b8d2c7e16",
+      "adaptation": "Package-relative imports only."
+    },
+    {
+      "path": "tests/test_concurrency.py",
+      "original_sha256": "0152ccc86866711da348932764ee815bf8208739c3ffe25518ba8b6e37a8fee0",
+      "exported_sha256": "21000e81398fc28213ce00525fc446052f8d2915148c3264c95b3db81ca7cd61",
+      "adaptation": "Imports point to the packaged implementation and independent test oracle."
+    },
+    {
+      "path": "tests/test_http.py",
+      "original_sha256": "394226b6006c7ac1cb8a95acbe831463bc9c181b4fa625e4f7b77baa47d85a59",
+      "exported_sha256": "c883f55ebdaf2a834bc4dad20f7a9ff7084327abbfeb125489a5dfdf7ccc365c",
+      "adaptation": "Import packaging, temporary output directory, explicit mock sampling types, and loopback proxy isolation; FakeEngine cases retained. No real GPU inference."
+    },
+    {
+      "path": "tests/test_sse.py",
+      "original_sha256": "2b649f6ad7006e7aac7e1b4a355fd81abb57c698685a3c61539ff90312008cd9",
+      "exported_sha256": "0143878111b818164214a1e7fe1e40d38d9a0ba3cb6804ccaa33fdbd3d8fa7a5",
+      "adaptation": "Package-relative benchmark driver import only."
+    },
+    {
+      "path": "src/trigger_guard/patches/vllm017.patch",
+      "original_sha256": "611b82973c999fd864aa4b2a3bb208c3785d15a2f7a1d312feb056705ed98e8c",
+      "exported_sha256": "611b82973c999fd864aa4b2a3bb208c3785d15a2f7a1d312feb056705ed98e8c",
+      "adaptation": "Unchanged source; LF line endings."
+    },
+    {
+      "path": "src/trigger_guard/patches/gdn34871.patch",
+      "original_sha256": "fff07e765db17d3004feb70e452f7ffb0213d71178c07378db482ec1e6d5c670",
+      "exported_sha256": "fff07e765db17d3004feb70e452f7ffb0213d71178c07378db482ec1e6d5c670",
+      "adaptation": "Unchanged source; LF line endings."
+    },
+    {
+      "path": "benchmarks/results/20261026/groups.csv",
+      "original_sha256": "fc7aa2090efc0a1c5338d89c9b830dbd7dae9dd12a535f09838e80a0ac9a4325",
+      "exported_sha256": "63a5a52a291baa093473affa83abf8a66ea21aeb09625699fe5ac8dc743fb559",
+      "adaptation": "Unchanged source; LF line endings."
+    },
+    {
+      "path": "benchmarks/results/20261026/dictionary_capacity.csv",
+      "original_sha256": "3a676593db0b724e01e6f11f615b09eea97aa02d5c092c53effd47020896dabe",
+      "exported_sha256": "8b6dbafd765937c84ce6f37f798b21cc5f24d41f63f018762abaa1044a11b0ed",
+      "adaptation": "Unchanged source; LF line endings."
+    }
+  ]
+}

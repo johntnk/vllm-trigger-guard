@@ -1,0 +1,33 @@
+{
+  "base_version": "0.17.0",
+  "base_commit": "b31e9326a7d9394aab8c767f8ebe225c65594b60",
+  "patch_order": [
+    "vllm017.patch",
+    "gdn34871.patch"
+  ],
+  "source_files": {
+    "vllm/outputs.py": "991c0960770a619066ccbf469cc08ce1e9523e7fe19e3a116c4cd13c1e1750a0",
+    "vllm/sampling_params.py": "414b8fc899c2ad6997bca3fa09d41ed4a2e0902af99ff36ea032670e9079cb6a",
+    "vllm/v1/attention/backends/gdn_attn.py": "f77f76d4429a89427f4e1bd155acb1b74d2d458ea1207083c908278d1aa5d423",
+    "vllm/v1/core/sched/async_scheduler.py": "4df37e8842fb06d5cce3bc414e9423a09808e9336a96a25530dd2270f078d093",
+    "vllm/v1/core/sched/scheduler.py": "de39455abe5c15f0f0640d23f85b3fce5a6769d3899df98d589e3982d92892fd",
+    "vllm/v1/engine/__init__.py": "8081ca52bc10e643f523df3931b91bb0553a080d286423d606db8dfd2ad5ecd3",
+    "vllm/v1/engine/core.py": "4c2a0e8fc7c63c1610dbf3c958d78ecc5e2a182f64209c3f65b6f8b9d52f789a",
+    "vllm/v1/engine/input_processor.py": "b73a3a163529ddeecc6d331aaa3f00d7d28b6a158ab52c631815dbfe277bbdb9",
+    "vllm/v1/engine/output_processor.py": "55c69b4c422d58428eb2e06ab27a83bb330583c54253524fb32ba7ff041192a2",
+    "vllm/v1/request.py": "f5f767b2edddfd02e49f9c548ffadf51e5ba6f8d64f0d6da1670a176a672633f"
+  },
+  "patched_files": {
+    "vllm/outputs.py": "f8d03969c0922449b24a210612a63c0b96e3e8c2a2c362207ed771b9a0afd1b8",
+    "vllm/sampling_params.py": "5027c02f40983aa1572b8afba901c38e18239ccc48c05a5ebf4d4fbf8e536df0",
+    "vllm/trigger_guard.py": "2e890926a37a0b87318088d140af2df1fdb1484fe10fd120fb53c3d96593927d",
+    "vllm/v1/attention/backends/gdn_attn.py": "4caf02a642d052617c7a6aaf796e99af4919db09fef0200064d9fe2ca69ffcdf",
+    "vllm/v1/core/sched/async_scheduler.py": "ebe04add9ae9a96103cbda79fb1687cd6b96a9d2e9a7e990f99e45964c6d3830",
+    "vllm/v1/core/sched/scheduler.py": "b0d813491153bbf4fdec1583b0231a1c749bd21b9b1986d308117d06ff3c9816",
+    "vllm/v1/engine/__init__.py": "855dd91972b363b36140c4d6bb459953bacbf2c3ecf7931a2861cf61be00134f",
+    "vllm/v1/engine/core.py": "0241aa4b83a6a18c1f0f787a6ba77906cec6d4b816a393ef381562d8e657d0f8",
+    "vllm/v1/engine/input_processor.py": "24d74145128e494c24e76b2e4dc6ef3654251436d4d450b371834aa202cfaa32",
+    "vllm/v1/engine/output_processor.py": "83cdb46d4388fcdc3a10284ff7dbba8882e8e06d3226d06162e71ec478e01907",
+    "vllm/v1/request.py": "03522821c0ddfedd0a3711a941b4839ab60e441ec0b09f681177cc0464f60f72"
+  }
+}

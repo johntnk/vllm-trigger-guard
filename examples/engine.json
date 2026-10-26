@@ -1,0 +1,15 @@
+{
+  "model": "/path/to/local/model",
+  "dtype": "bfloat16",
+  "kv_cache_dtype": "fp8",
+  "max_model_len": 4096,
+  "max_num_seqs": 16,
+  "max_num_batched_tokens": 2048,
+  "tensor_parallel_size": 1,
+  "pipeline_parallel_size": 1,
+  "gpu_memory_utilization": 0.8,
+  "enforce_eager": true,
+  "enable_prefix_caching": false,
+  "async_scheduling": true,
+  "speculative_config": {"method": "mtp", "num_speculative_tokens": 3}
+}

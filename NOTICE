@@ -1,0 +1,21 @@
+vllm-trigger-guard
+Copyright 2026 johntnk and contributors.
+
+This experimental project contains modifications to vLLM, licensed under the
+Apache License, Version 2.0. Copyright contributors to the vLLM project.
+Upstream: https://github.com/vllm-project/vllm
+Pinned integration: v0.17.0, commit b31e9326a7d9394aab8c767f8ebe225c65594b60.
+
+The GDN attention fix is a backport of upstream PR #34871:
+https://github.com/vllm-project/vllm/pull/34871
+It is attributed to its upstream authors and is not claimed as a new fix here.
+
+The token-rule encoder follows the bare/leading-space encoding approach used
+by vLLM's bad_words processing. This project implements a different stopping
+policy; it does not enable native bad_words logits masking.
+
+Aho-Corasick is an established multi-pattern matching algorithm. No claim of
+inventing the algorithm or of being the first streaming output guard is made.
+
+Implementation, packaging, documentation and experiments used AI assistance.
+This project is independent and is not an official vLLM project component.

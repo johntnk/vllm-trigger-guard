@@ -1,0 +1,770 @@
+--- a/vllm/outputs.py
++++ b/vllm/outputs.py
+@@ -46,6 +46,7 @@
+     finish_reason: str | None = None
+     stop_reason: int | str | None = None
+     lora_request: LoRARequest | None = None
++    trigger_guard_event: dict[str, Any] | None = None
+ 
+     def finished(self) -> bool:
+         return self.finish_reason is not None
+@@ -151,6 +152,11 @@
+         for next_completion in next_output.outputs:
+             for i, completion in enumerate(self.outputs):
+                 if completion.index == next_completion.index:
++                    # A guarded terminal seals this completion in both DELTA
++                    # and CUMULATIVE modes; duplicate/late input cannot revive it.
++                    if (completion.trigger_guard_event is not None
++                            and completion.finish_reason is not None):
++                        break
+                     if aggregate:
+                         # Merge outputs with same index
+                         completion.text += next_completion.text
+@@ -165,6 +171,10 @@
+                         )
+                         completion.finish_reason = next_completion.finish_reason
+                         completion.stop_reason = next_completion.stop_reason
++                        if next_completion.trigger_guard_event is not None:
++                            completion.trigger_guard_event = (
++                                next_completion.trigger_guard_event
++                            )
+                     else:
+                         # Replace the output with the new one
+                         self.outputs[i] = next_completion
+--- a/vllm/sampling_params.py
++++ b/vllm/sampling_params.py
+@@ -281,6 +281,9 @@
+     generated token can complete the sequence."""
+     _bad_words_token_ids: list[list[int]] | None = None
+ 
++    # Experimental server-owned policy, overwritten by InputProcessor.
++    _trigger_guard_policy: str | None = None
++
+     skip_reading_prefix_cache: bool | None = None
+ 
+     repetition_detection: RepetitionDetectionParams | None = None
+--- /dev/null
++++ b/vllm/trigger_guard.py
+@@ -0,0 +1,283 @@
++# SPDX-License-Identifier: Apache-2.0
++"""Experimental post-verification token guard. Pure CPU, no vLLM dependencies.
++
++TOKEN_SEQUENCE is deliberately narrower than literal-text filtering. Candidate
++blocks MUST have been validated and had native-unreachable positions excluded.
++"""
++from dataclasses import dataclass
++from functools import lru_cache
++import json
++from pathlib import Path
++from collections import deque
++from types import MappingProxyType
++import hashlib
++import os
++
++IMPLEMENTATION_VERSION = "trigger-guard-v2.1"
++MAX_RULES = 100000
++MAX_RULE_CHARACTERS = 16000000
++MAX_RULE_LENGTH = 4096
++MAX_RULE_TOKENS = 8000000
++MAX_PROGRAM_STATES = 4000000
++
++
++class SparseAutomaton:
++    """Immutable sparse Aho-Corasick program; only the cursor is per request.
++
++    Patterns carry integer ranks (priority then rule_id). Failure outputs retain
++    only the lowest rank: the API needs the first completion, not every match.
++    """
++    def __init__(self, patterns):
++        edges, failure, winners = [{}], [0], [None]
++        for sequence, rank in patterns:
++            node = 0
++            for symbol in sequence:
++                child = edges[node].get(symbol)
++                if child is None:
++                    if len(edges) >= MAX_PROGRAM_STATES:
++                        raise ValueError("POLICY_BUILD_BUDGET: automaton states")
++                    child = len(edges)
++                    edges[node][symbol] = child
++                    edges.append({}); failure.append(0); winners.append(None)
++                node = child
++            if winners[node] is None or rank < winners[node]:
++                winners[node] = rank
++        queue = deque(edges[0].values())
++        while queue:
++            node = queue.popleft()
++            for symbol, child in edges[node].items():
++                queue.append(child)
++                fallback = failure[node]
++                while fallback and symbol not in edges[fallback]:
++                    fallback = failure[fallback]
++                failure[child] = edges[fallback].get(symbol, 0)
++                inherited = winners[failure[child]]
++                if inherited is not None and (winners[child] is None or inherited < winners[child]):
++                    winners[child] = inherited
++        self.edges = tuple(MappingProxyType(e) for e in edges)
++        self.failure = tuple(failure)
++        self.winners = tuple(winners)
++
++    def advance(self, cursor, symbol):
++        while cursor and symbol not in self.edges[cursor]:
++            cursor = self.failure[cursor]
++        return self.edges[cursor].get(symbol, 0)
++
++
++@dataclass(frozen=True)
++class TriggerRule:
++    rule_id: str
++    text: str
++    token_sequences: tuple[tuple[int, ...], ...]
++    priority: int = 0
++
++
++@dataclass(frozen=True)
++class MatcherState:
++    suffix: tuple[int, ...] = ()
++    committed_count: int = 0
++    terminal: bool = False
++    matched_rule_id: str | None = None
++    cursor: int = 0
++
++
++@dataclass(frozen=True)
++class TriggerDecision:
++    triggered: bool
++    safe_prefix_length: int
++    matched_rule_id: str | None
++    match_end_output_index: int | None
++    next_state: MatcherState
++
++
++class TokenMatcher:
++    def __init__(self, rules, vocab_size, special_ids=()):
++        if type(vocab_size) is not int or vocab_size < 1:
++            raise ValueError("invalid vocabulary size")
++        self.vocab_size = vocab_size
++        self.by_last = {}
++        self.max_suffix = 0
++        seen = set()
++        special_ids = frozenset(special_ids)
++        rules = sorted(rules, key=lambda r: (r.priority, r.rule_id))
++        if len(rules) > MAX_RULES:
++            raise ValueError("CONFIG_LIMIT: rule count")
++        token_total = sum(len(s) for r in rules for s in r.token_sequences)
++        if token_total > MAX_RULE_TOKENS:
++            raise ValueError("CONFIG_LIMIT: total rule tokens")
++        for rule in rules:
++            if not rule.rule_id or rule.rule_id in seen or not rule.text:
++                raise ValueError("rule IDs must be unique and text nonempty")
++            if type(rule.priority) is not int or not rule.token_sequences:
++                raise ValueError("invalid priority or empty rule sequences")
++            seen.add(rule.rule_id)
++            for seq in sorted(set(rule.token_sequences)):
++                if not seq or any(type(t) is not int or t < 0 or t >= vocab_size
++                                  or t in special_ids for t in seq):
++                    raise ValueError("empty, invalid, or special token sequence")
++                self.max_suffix = max(self.max_suffix, len(seq) - 1)
++                self.by_last.setdefault(seq[-1], []).append((seq, rule.rule_id))
++        if not seen:
++            raise ValueError("at least one rule is required")
++        self.by_last = MappingProxyType({k: tuple(v) for k,v in self.by_last.items()})
++        self.automaton = None
++        self.rule_ids = tuple(r.rule_id for r in rules)
++        if max(map(len, self.by_last.values())) > 32:
++            self.automaton = SparseAutomaton((seq, rank) for rank,r in enumerate(rules)
++                                            for seq in set(r.token_sequences))
++
++    def inspect_block(self, state, effective_token_ids):
++        if state.terminal:
++            return TriggerDecision(False, 0, None, None, state)
++        suffix, count = state.suffix, state.committed_count
++        cursor = state.cursor
++        for pos, token in enumerate(effective_token_ids):
++            if type(token) is not int or not 0 <= token < self.vocab_size:
++                raise ValueError("matcher only accepts validated, unpadded token IDs")
++            if self.automaton is not None:
++                next_cursor = self.automaton.advance(cursor, token)
++                rank = self.automaton.winners[next_cursor]
++                if rank is not None:
++                    rule_id = self.rule_ids[rank]
++                    next_state = MatcherState((), count, True, rule_id, cursor)
++                    return TriggerDecision(True, pos, rule_id, count, next_state)
++                cursor = next_cursor
++                count += 1
++                continue
++            for seq, rule_id in self.by_last.get(token, ()):
++                prefix = seq[:-1]
++                if not prefix or (len(suffix) >= len(prefix)
++                                  and suffix[-len(prefix):] == prefix):
++                    next_state = MatcherState(suffix, count, True, rule_id)
++                    return TriggerDecision(True, pos, rule_id, count, next_state)
++            if self.max_suffix:
++                suffix = (suffix + (token,))[-self.max_suffix:]
++            count += 1
++        return TriggerDecision(False, len(effective_token_ids), None, None,
++                               MatcherState(suffix, count, cursor=cursor))
++
++
++def validate_notice(words, notice):
++    if not isinstance(notice, str) or not notice:
++        raise ValueError("a nonempty server notice is required")
++    for word in words:
++        if word in notice:
++            raise ValueError("notice contains a trigger")
++        # Reject any notice that could complete a word across the boundary,
++        # for ANY already-published safe prefix. No output rollback is needed.
++        for split in range(1, len(word)):
++            if notice.startswith(word[split:]):
++                raise ValueError("notice can complete a trigger across its boundary")
++
++
++def load_policy(path):
++    data = json.loads(Path(path).read_text(encoding="utf-8"))
++    if data.get("match_semantics") != "literal_substring":
++        raise ValueError("only exact literal_substring semantics are defined")
++    if any(not isinstance(data.get(k), str) or not data[k]
++           for k in ("policy_version", "notice_id")):
++        raise ValueError("policy_version and notice_id are required")
++    rules = data.get("rules")
++    if not isinstance(rules, list) or not rules:
++        raise ValueError("nonempty rules are required")
++    if len(rules) > MAX_RULES:
++        raise ValueError("CONFIG_LIMIT: rule count")
++    seen = set()
++    for rule in rules:
++        if (not isinstance(rule.get("text"), str) or not rule["text"]
++                or not isinstance(rule.get("rule_id"), str) or not rule["rule_id"]
++                or rule["rule_id"] in seen or type(rule.get("priority", 0)) is not int):
++            raise ValueError("invalid or duplicate rule")
++        seen.add(rule["rule_id"])
++    if (sum(len(r['text']) for r in rules) > MAX_RULE_CHARACTERS
++            or max(len(r['text']) for r in rules) > MAX_RULE_LENGTH):
++        raise ValueError("CONFIG_LIMIT: literal character budget")
++    validate_notice([r["text"] for r in rules], data.get("notice"))
++    return data
++
++
++def compile_policy(policy, tokenizer):
++    """Encode once at server initialization; preserve exact configured spaces."""
++    special = set(tokenizer.all_special_ids)
++    vocab_size = max(tokenizer.get_vocab().values()) + 1
++    rules = []
++    for rule in policy["rules"]:
++        seqs = sorted({tuple(tokenizer.encode(prefix + rule["text"],
++                                             add_special_tokens=False))
++                       for prefix in ("", " ")})
++        rules.append({**rule, "token_sequences": seqs})
++    compiled = {"policy_version": policy["policy_version"],
++                "notice_id": policy["notice_id"],
++                "vocab_size": vocab_size, "special_ids": sorted(special),
++                "rules": rules}
++    compiled['implementation_version'] = IMPLEMENTATION_VERSION
++    compiled['match_semantics'] = policy['match_semantics']
++    compiled['tokenizer_fingerprint'] = hashlib.sha256(json.dumps(
++        {'vocab': sorted(tokenizer.get_vocab().items()), 'special': sorted(special)},
++        ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
++    serialized = json.dumps(compiled, sort_keys=True, ensure_ascii=False)
++    matcher_from_json(serialized)  # validate before any request is accepted
++    return serialized
++
++
++def policy_reference(serialized):
++    """Trusted startup-only registry; carry a digest across request RPC, not N rules.
++
++    Active requests retain immutable matcher objects. The bounded process cache
++    can evict an unused policy without deleting an active request's reference.
++    """
++    directory = os.environ.get('TG_POLICY_REGISTRY_DIR')
++    if not directory:
++        return serialized
++    digest = hashlib.sha256(serialized.encode('utf-8')).hexdigest()
++    path = Path(directory) / (digest + '.json')
++    path.parent.mkdir(parents=True, exist_ok=True)
++    if path.exists():
++        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
++            raise ValueError('policy registry digest mismatch')
++    else:
++        with path.open('x', encoding='utf-8', newline='') as f:
++            f.write(serialized)
++    return 'tg2:' + digest
++
++
++@lru_cache(maxsize=2)
++def matcher_from_json(serialized):
++    if serialized.startswith('tg2:'):
++        digest = serialized[4:]
++        if len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
++            raise ValueError('invalid trusted policy reference')
++        path = Path(os.environ['TG_POLICY_REGISTRY_DIR']) / (digest + '.json')
++        content = path.read_bytes()
++        if len(content) > 256 * 1024 * 1024 or hashlib.sha256(content).hexdigest() != digest:
++            raise ValueError('invalid policy artifact')
++        serialized = content.decode('utf-8')
++    data = json.loads(serialized)
++    rules = [TriggerRule(r["rule_id"], r["text"],
++                         tuple(tuple(s) for s in r["token_sequences"]),
++                         r.get("priority", 0)) for r in data["rules"]]
++    matcher = TokenMatcher(rules, data["vocab_size"], data["special_ids"])
++    matcher.policy_version = data["policy_version"]
++    matcher.notice_id = data.get("notice_id", "default_notice")
++    return matcher
++
++
++def validate_sampling(params):
++    """Called before generation-config EOS expansion, so native EOS is allowed."""
++    unsupported = (params.n != 1 or params.stop or params.stop_token_ids
++                   or params.min_tokens or params.ignore_eos or params.bad_words
++                   or params.logprobs is not None or params.prompt_logprobs is not None
++                   or params.structured_outputs is not None
++                   or params.repetition_detection is not None
++                   or not params.detokenize or not params.skip_special_tokens
++                   or params.include_stop_str_in_output)
++    if unsupported:
++        raise ValueError("unsupported combination for Trigger Guard experiment")
++
++
++def write_test_trace(path, row):
++    """Private controlled-text traces only; intentionally excluded from timings."""
++    import time
++    row["t_trace_ns"] = time.perf_counter_ns()
++    with open(path, "a", encoding="utf-8") as stream:
++        stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+--- a/vllm/v1/core/sched/async_scheduler.py
++++ b/vllm/v1/core/sched/async_scheduler.py
+@@ -44,16 +44,21 @@
+             return [], False
+ 
+         status_before_update = request.status
++        original_effective_count = len(new_token_ids)
+         new_token_ids, stopped = super()._update_request_with_output(
+             request, new_token_ids
+         )
+ 
+         # Update the number of output placeholders.
+-        request.num_output_placeholders -= len(new_token_ids)
++        consumed = (original_effective_count
++                    if request.trigger_guard_matcher is not None
++                    else len(new_token_ids))
++        request.num_output_placeholders -= consumed
+         assert request.num_output_placeholders >= 0
+ 
+         # Cache the new tokens. Preempted requests should be skipped.
+-        if status_before_update == RequestStatus.RUNNING:
++        if (status_before_update == RequestStatus.RUNNING
++                and not (request.trigger_guard_matcher is not None and stopped)):
+             self.kv_cache_manager.cache_blocks(
+                 request, request.num_computed_tokens - request.num_output_placeholders
+             )
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -1,6 +1,7 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ import itertools
++import os
+ import time
+ from collections import defaultdict, deque
+ from collections.abc import Iterable
+@@ -151,6 +152,8 @@
+ 
+         # req_id -> Request
+         self.requests: dict[str, Request] = {}
++        # Test-only detailed traces. Disabled in main performance runs.
++        self.trigger_guard_trace_path = os.environ.get("TG_CANDIDATE_TRACE")
+         # Scheduling policy
+         try:
+             self.policy = SchedulingPolicy(self.scheduler_config.policy)
+@@ -1260,6 +1263,7 @@
+         scheduler_output: SchedulerOutput,
+         model_runner_output: ModelRunnerOutput,
+     ) -> dict[int, EngineCoreOutputs]:
++        trigger_guard_result_ready_ns = time.perf_counter_ns()
+         sampled_token_ids = model_runner_output.sampled_token_ids
+         logprobs = model_runner_output.logprobs
+         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
+@@ -1304,6 +1308,12 @@
+                 continue
+             request = self.requests.get(req_id)
+             if request is None or request.is_finished():
++                if trace_path := getattr(self, "trigger_guard_trace_path", None):
++                    from vllm.trigger_guard import write_test_trace
++
++                    write_test_trace(trace_path, {
++                        "request_id": req_id, "discarded_late_result": True
++                    })
+                 # The request is already finished. This can happen if the
+                 # request is aborted while the model is executing it (e.g.,
+                 # in pipeline parallelism or in async scheduling).
+@@ -1350,9 +1360,15 @@
+             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
+             kv_transfer_params = None
+             status_before_stop = request.status
++            trace_path = getattr(self, "trigger_guard_trace_path", None)
++            trace_tokens = list(new_token_ids) if trace_path else None
+ 
+             # Check for stop and update request status.
+             if new_token_ids:
++                if request.trigger_guard_matcher is not None:
++                    request.trigger_guard_host_result_ready_ns = (
++                        trigger_guard_result_ready_ns
++                    )
+                 new_token_ids, stopped = self._update_request_with_output(
+                     request, new_token_ids
+                 )
+@@ -1360,6 +1376,18 @@
+                 # Pooling stops as soon as there is output.
+                 request.status = RequestStatus.FINISHED_STOPPED
+                 stopped = True
++
++            if trace_path:
++                from vllm.trigger_guard import write_test_trace
++
++                write_test_trace(trace_path, {
++                    "request_id": req_id,
++                    "effective_token_ids": trace_tokens,
++                    "scheduled_draft_token_ids": scheduled_spec_token_ids,
++                    "safe_token_ids": new_token_ids,
++                    "terminal": stopped,
++                    "policy_event": request.trigger_guard_event,
++                })
+ 
+             routed_experts = None
+             finish_reason = None
+@@ -1426,6 +1454,7 @@
+                         num_external_computed_tokens=request.num_external_computed_tokens,
+                         routed_experts=routed_experts,
+                         num_nans_in_logits=request.num_nans_in_logits,
++                        trigger_guard_event=request.trigger_guard_event,
+                     )
+                 )
+             else:
+@@ -1555,6 +1584,8 @@
+     def _update_request_with_output(
+         self, request: Request, new_token_ids: list[int]
+     ) -> tuple[list[int], bool]:
++        if request.trigger_guard_matcher is not None:
++            return self._update_request_with_trigger_guard(request, new_token_ids)
+         # Append generated tokens and check for stop. Note that if
+         # a request is still being prefilled, we expect the model runner
+         # to return empty token ids for the request.
+@@ -1569,6 +1600,82 @@
+                 del new_token_ids[num_new:]  # Trim new tokens if needed.
+                 break
+         return new_token_ids, stopped
++
++    def _update_request_with_trigger_guard(
++        self, request: Request, effective_token_ids: list[int]
++    ) -> tuple[list[int], bool]:
++        # Called only AFTER MTP verification/acceptance accounting. Never mutate
++        # effective_token_ids: async placeholder consumption needs its full count.
++        if request.is_finished():
++            return [], True
++        started = time.perf_counter_ns()
++        safe = []
++        stopped = False
++        matched = None
++        matcher_error = False
++        params = request.sampling_params
++        assert params is not None
++        matcher = request.trigger_guard_matcher
++        for token in effective_token_ids:
++            if (request.num_tokens >= self.max_model_len
++                    or request.num_output_tokens >= request.max_tokens):
++                request.status = RequestStatus.FINISHED_LENGTH_CAPPED
++                stopped = True
++                break
++            # Native EOS/control stops win; they are not text candidates.
++            native_stop = (token == params.eos_token_id
++                           or token in (params.stop_token_ids or ()))
++            if not native_stop:
++                try:
++                    decision = matcher.inspect_block(
++                        request.trigger_guard_state, [token]
++                    )
++                except Exception:
++                    # Fail closed for this request, not a normal policy hit.
++                    request.status = RequestStatus.FINISHED_ERROR
++                    matcher_error = True
++                    stopped = True
++                    break
++                request.trigger_guard_state = decision.next_state
++                if decision.triggered:
++                    matched = decision.matched_rule_id
++                    request.status = RequestStatus.FINISHED_STOPPED
++                    stopped = True
++                    break
++            request.append_output_token_ids(token)
++            safe.append(token)
++            if check_stop(request, self.max_model_len):
++                stopped = True
++                break
++        ended = time.perf_counter_ns()
++        request.trigger_guard_ns += ended - started
++        request.trigger_guard_blocks += 1
++        if stopped:
++            request.trigger_guard_event = {
++                "triggered": matched is not None,
++                "matcher_error": matcher_error,
++                "rule_id": matched,
++                "policy_version": matcher.policy_version,
++                "notice_id": matcher.notice_id,
++                "match_end_output_index": (
++                    request.trigger_guard_state.committed_count if matched else None
++                ),
++                "safe_prefix_length": len(safe),
++                "validated_block_tokens": len(effective_token_ids),
++                "policy_truncated_effective_tokens": (
++                    len(effective_token_ids) - len(safe) if matched else 0
++                ),
++                "published_model_tokens": request.num_output_tokens,
++                "guard_total_ns": request.trigger_guard_ns,
++                "guard_blocks": request.trigger_guard_blocks,
++                "t_guard_start_ns": started,
++                "t_host_result_ready_ns": getattr(
++                    request, "trigger_guard_host_result_ready_ns", started
++                ),
++                "t_guard_end_ns": ended,
++                "t_terminal_mark_ns": ended,
++            }
++        return safe, stopped
+ 
+     def _free_encoder_inputs(self, request: Request) -> None:
+         cached_encoder_input_ids = self.encoder_cache_manager.get_cached_input_ids(
+--- a/vllm/v1/engine/__init__.py
++++ b/vllm/v1/engine/__init__.py
+@@ -177,6 +177,9 @@
+     # The number of NaNs in logits.
+     # A value greater than 0 indicates that the output is corrupted.
+     num_nans_in_logits: int = 0
++
++    # Internal policy metadata; never contains candidate text or token IDs.
++    trigger_guard_event: dict[str, Any] | None = None
+ 
+     @property
+     def finished(self) -> bool:
+--- a/vllm/v1/engine/core.py
++++ b/vllm/v1/engine/core.py
+@@ -322,6 +322,21 @@
+ 
+         self.scheduler.add_request(request)
+ 
++    def trigger_guard_resources(self, application_ids: list[str]) -> dict:
++        """Read-only isolated-adapter probe of native request/KV reclamation.
++
++        Request IDs are fresh application UUIDs plus vLLM's native random suffix.
++        No tombstones or extra resource lifecycle are introduced here.
++        """
++        if os.environ.get('TG_EXPERIMENT_ADAPTER') != '1' or len(application_ids) > 256:
++            raise ValueError('resource probe is restricted to the experiment adapter')
++        active = tuple(self.scheduler.requests)
++        return {'reclaimed': [uid for uid in application_ids
++                              if not any(rid.startswith(uid + '-') for rid in active)],
++                'native_requests': len(active),
++                'native_finished_pending': sum(r.is_finished() for r in self.scheduler.requests.values()),
++                'kv_usage': self.scheduler.kv_cache_manager.usage}
++
+     def abort_requests(self, request_ids: list[str]):
+         """Abort requests from the scheduler."""
+ 
+--- a/vllm/v1/engine/input_processor.py
++++ b/vllm/v1/engine/input_processor.py
+@@ -1,6 +1,7 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ 
++import os
+ import time
+ from collections.abc import Mapping
+ from typing import Any, Literal
+@@ -56,6 +57,23 @@
+ 
+         self.renderer = renderer or renderer_from_config(vllm_config)
+ 
++        self.trigger_guard_policy = None
++        policy_path = os.environ.get("TG_CORE_POLICY")
++        if policy_path:
++            from vllm.trigger_guard import compile_policy, load_policy, policy_reference
++
++            if os.environ.get("TG_EXPERIMENT_ADAPTER") != "1":
++                raise ValueError("Trigger Guard requires the experiment notice adapter")
++            pc = vllm_config.parallel_config
++            if (pc.tensor_parallel_size != 1 or pc.pipeline_parallel_size != 1
++                    or pc.data_parallel_size != 1 or self.lora_config
++                    or vllm_config.kv_transfer_config
++                    or envs.VLLM_DISABLE_REQUEST_ID_RANDOMIZATION):
++                raise ValueError("unsupported runtime for Trigger Guard experiment")
++            self.trigger_guard_policy = policy_reference(compile_policy(
++                load_policy(policy_path), self.renderer.get_tokenizer()
++            ))
++
+         self.supports_mm_inputs = mm_registry.supports_multimodal_inputs(model_config)
+         self.mm_encoder_cache_size = 0
+         self.skip_prompt_length_check = False
+@@ -228,6 +246,13 @@
+         self._validate_params(params, supported_tasks)
+         self._validate_lora(lora_request)
+ 
++        if self.trigger_guard_policy is not None:
++            from vllm.trigger_guard import validate_sampling
++
++            if not isinstance(params, SamplingParams) or lora_request or resumable:
++                raise ValueError("Trigger Guard supports non-resumable text generation")
++            validate_sampling(params)
++
+         parallel_config = self.vllm_config.parallel_config
+         dp_size = parallel_config.data_parallel_size
+         dp_local_size = parallel_config.data_parallel_size_local
+@@ -283,6 +308,12 @@
+         if isinstance(params, SamplingParams):
+             # TODO: can we avoid cloning here in multiproc case?
+             sampling_params = params.clone()
++            # Never trust a request-provided internal policy, including OFF mode.
++            sampling_params._trigger_guard_policy = self.trigger_guard_policy
++            if self.trigger_guard_policy and (
++                decoder_inputs["type"] != "token" or prompt_embeds is not None
++            ):
++                raise ValueError("Trigger Guard accepts tokenized text only")
+             # If unset max tokens, then generate up to the max_model_len.
+             if sampling_params.max_tokens is None:
+                 seq_len = length_from_prompt_token_ids_or_embeds(
+--- a/vllm/v1/engine/output_processor.py
++++ b/vllm/v1/engine/output_processor.py
+@@ -2,6 +2,7 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ 
+ import asyncio
++import os
+ from collections import defaultdict, deque
+ from collections.abc import Iterable
+ from dataclasses import dataclass
+@@ -51,6 +52,10 @@
+     producer gets ahead of the consumer.
+     """
+ 
++    pending_bytes_total = 0
++    pending_bytes_peak = 0
++    overflow_total = 0
++
+     def __init__(self, output_kind: RequestOutputKind, request_id: str):
+         self.aggregate = output_kind == RequestOutputKind.DELTA
+         self.request_id = request_id
+@@ -58,9 +63,48 @@
+         self.ready = asyncio.Event()
+ 
+         self._input_stream_task: asyncio.Task | None = None
++        self._pending_bytes = 0
++        self._budget_error = False
++        self._byte_limit = int(os.environ.get('TG_COLLECTOR_REQUEST_BYTES', '0'))
++        self._global_byte_limit = int(os.environ.get('TG_COLLECTOR_GLOBAL_BYTES', '0'))
++
++    def _release_budget(self):
++        RequestOutputCollector.pending_bytes_total -= self._pending_bytes
++        self._pending_bytes = 0
++
++    def _reserve_budget(self, output):
++        if not self._byte_limit or not isinstance(output, RequestOutput):
++            return True
++        # Conservative owned text/token estimate, not a whole-process RSS bound.
++        # Guarded API rejects logprobs; fail closed if another caller enables it.
++        if any(c.logprobs is not None for c in output.outputs):
++            return False
++        size = sum(8 * len(c.text.encode('utf-8')) + 40 * len(c.token_ids)
++                   for c in output.outputs) + 2048
++        size += self._pending_bytes if self.aggregate and self.output is not None else 0
++        delta = size - self._pending_bytes
++        if (size > self._byte_limit or (self._global_byte_limit and
++                RequestOutputCollector.pending_bytes_total + delta > self._global_byte_limit)):
++            return False
++        self._pending_bytes = size
++        RequestOutputCollector.pending_bytes_total += delta
++        RequestOutputCollector.pending_bytes_peak = max(RequestOutputCollector.pending_bytes_peak,
++                                                        RequestOutputCollector.pending_bytes_total)
++        return True
+ 
+     def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
+         """Non-blocking put operation."""
++        if self._budget_error:
++            return
++        if not self._reserve_budget(output):
++            self._release_budget()
++            self._budget_error = True
++            RequestOutputCollector.overflow_total += 1
++            self.output = RuntimeError('collector pending-byte budget exceeded')
++            self.ready.set()
++            return
++        if isinstance(output, Exception):
++            self._release_budget()
+         if self.output is None or isinstance(output, Exception):
+             self.output = output
+             self.ready.set()
+@@ -80,6 +124,7 @@
+         while (output := self.output) is None:
+             await self.ready.wait()
+         self.output = None
++        self._release_budget()
+         self.ready.clear()
+         if isinstance(output, Exception):
+             raise output
+@@ -90,12 +135,15 @@
+         output = self.output
+         if output is not None:
+             self.output = None
++            self._release_budget()
+             self.ready.clear()
+         if isinstance(output, Exception):
+             raise output
+         return output
+ 
+     def close(self):
++        self._release_budget()
++        self.output = None
+         if self._input_stream_task is not None:
+             self._input_stream_task.cancel()
+         self._input_stream_task = None
+@@ -625,7 +673,11 @@
+                 assert req_state.logprobs_processor is not None
+                 # 2) Detokenize the token ids into text and perform stop checks.
+                 stop_string = req_state.detokenizer.update(
+-                    new_token_ids, finish_reason == FinishReason.STOP
++                    new_token_ids,
++                    finish_reason == FinishReason.STOP
++                    and not (engine_core_output.trigger_guard_event or {}).get(
++                        "triggered", False
++                    ),
+                 )
+                 if stop_string:
+                     finish_reason = FinishReason.STOP
+@@ -644,6 +696,11 @@
+                 kv_transfer_params,
+                 routed_experts,
+             ):
++                if engine_core_output.trigger_guard_event is not None:
++                    assert len(request_output.outputs) == 1
++                    request_output.outputs[0].trigger_guard_event = (
++                        engine_core_output.trigger_guard_event
++                    )
+                 if req_state.streaming_input:
+                     request_output.finished = False
+ 
+--- a/vllm/v1/request.py
++++ b/vllm/v1/request.py
+@@ -92,6 +92,19 @@
+         self.events: list[EngineCoreEvent] = []
+         self.stop_reason: int | str | None = None
+ 
++        self.trigger_guard_matcher = None
++        self.trigger_guard_state = None
++        self.trigger_guard_event = None
++        self.trigger_guard_ns = 0
++        self.trigger_guard_blocks = 0
++        if sampling_params and sampling_params._trigger_guard_policy:
++            from vllm.trigger_guard import MatcherState, matcher_from_json
++
++            self.trigger_guard_matcher = matcher_from_json(
++                sampling_params._trigger_guard_policy
++            )
++            self.trigger_guard_state = MatcherState()
++
+         # P/D: Connector-specific KV transfer parameters.
+         self.kv_transfer_params: dict[str, Any] | None = None
+ 

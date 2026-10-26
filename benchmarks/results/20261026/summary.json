@@ -1,0 +1,76 @@
+{
+  "classification": "FUNCTIONAL_BUT_CAPACITY_PROVISIONAL",
+  "cpu_mock_passed": 69,
+  "gdn_metadata_passed": 8,
+  "load_driver_passed": 7,
+  "gpu_runs_passed": 9,
+  "async_main_groups_passed": 40,
+  "actual_dispatches": 4456,
+  "outcomes": {
+    "completed": 4176,
+    "cancelled_by_client": 83,
+    "rejected": 197
+  },
+  "main_formal_outcomes": {
+    "completed": 3224,
+    "cancelled_by_client": 43,
+    "rejected": 165
+  },
+  "historical_cuda_gather_attribution": "UNRESOLVED",
+  "absolute_slo": null,
+  "production_capacity": null,
+  "evidence": "historical_pinned_gpu_run_not_a_rerun_of_this_package",
+  "date": "2026-10-26",
+  "hardware": "One NVIDIA RTX 4090 D, 48 GiB",
+  "vllm_version": "0.17.0",
+  "vllm_commit": "b31e9326a7d9394aab8c767f8ebe225c65594b60",
+  "model_architecture": "Qwen3_5ForConditionalGeneration",
+  "model_snapshot": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+  "compute_dtype": "bfloat16",
+  "weights": "FP8",
+  "kv_cache_dtype": "FP8",
+  "attention_backend": "TRITON_ATTN",
+  "max_model_len": 4096,
+  "mtp_depth": 3,
+  "async_scheduling": true,
+  "protected_outcomes": {
+    "normal_completed": 3300,
+    "policy_completed": 600,
+    "cancelled_by_client": 63,
+    "rejected": 197
+  },
+  "negative_completed": 3284,
+  "negative_notices": 0,
+  "matched_short": {
+    "requests_per_arm": 32,
+    "planned_rate": 2.088251361738101,
+    "n16": {
+      "ttft_p95_s": 0.3732962301466614,
+      "e2e_p95_s": 3.4471595825161785
+    },
+    "n100000": {
+      "ttft_p95_s": 0.38792526060715316,
+      "e2e_p95_s": 3.4371236390434206
+    }
+  },
+  "soak": {
+    "rules": 100000,
+    "engine_admission": 4,
+    "waiting": 8,
+    "arrival_rate": 0.4206701177253921,
+    "target_s": 3600,
+    "elapsed_with_drain_s": 3605.4010589,
+    "sent": 1515,
+    "completed": 1494,
+    "cancelled_by_client": 21,
+    "rejected": 0,
+    "policy_completed": 149
+  },
+  "resource_observations": {
+    "service_rss_gib_approx": 4.05,
+    "soak_rss_growth_mib_approx": 3.1,
+    "gpu_peak_mib": 37100,
+    "cpu_standard_100000_peak_rss_gib": 1.45
+  },
+  "original_private_archive_sha256": "88b4fffc9b47ad030821dead0ed4e508f7ba55b02ddcb0fbd0cee99dd0200d38"
+}

@@ -1,0 +1,10 @@
+{
+  "policy_version": "example-v1",
+  "notice_id": "example-notice-v1",
+  "match_semantics": "literal_substring",
+  "notice": "\n\n【提示】我不能继续了。",
+  "rules": [
+    {"rule_id": "example-001", "text": "花朵", "priority": 0},
+    {"rule_id": "example-002", "text": "ZXQ_BLOCK_ALPHA", "priority": 0}
+  ]
+}
