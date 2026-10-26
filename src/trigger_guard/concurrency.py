@@ -80,7 +80,11 @@ class Admission:
             self.waiters.append(item)
             self.waiting_tokens+=tokens;self.waiting_bytes+=input_bytes
         try:
-            await asyncio.wait_for(asyncio.shield(item.ready),timeout)
+            # Python 3.11 wait_for can swallow cancellation if ready completes
+            # in the same loop turn. Keep cancellation on the acquiring task
+            # so the cleanup below always returns its queue/engine budget.
+            async with asyncio.timeout(timeout):
+                await asyncio.shield(item.ready)
             return item
         except BaseException:
             if item in self.waiters:

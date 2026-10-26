@@ -32,8 +32,8 @@
     {
       "path": "src/trigger_guard/concurrency.py",
       "original_sha256": "d58b5452354b951a930efe586232ffecf4efa789ffa4e52dd2c557ad3b842852",
-      "exported_sha256": "d58b5452354b951a930efe586232ffecf4efa789ffa4e52dd2c557ad3b842852",
-      "adaptation": "Unchanged source; LF line endings."
+      "exported_sha256": "903c70e7f262f41e227d66518172dfcd62c7b220954c64423a4c6e728f4f74bd",
+      "adaptation": "Replace wait_for with asyncio.timeout to preserve cancellation when admission completes concurrently on Python 3.11; existing budget cleanup retained."
     },
     {
       "path": "src/trigger_guard/server.py",
@@ -80,8 +80,8 @@
     {
       "path": "tests/test_concurrency.py",
       "original_sha256": "0152ccc86866711da348932764ee815bf8208739c3ffe25518ba8b6e37a8fee0",
-      "exported_sha256": "21000e81398fc28213ce00525fc446052f8d2915148c3264c95b3db81ca7cd61",
-      "adaptation": "Imports point to the packaged implementation and independent test oracle."
+      "exported_sha256": "7f9f9b9bc8746c21ceb81b00446aa63453cd29d3b4dc9a8bfd3a0eb6a407b044",
+      "adaptation": "Packaged imports and independent test oracle; extend cancellation regression to cover queued and newly admitted requests, budget reclamation and subsequent admission."
     },
     {
       "path": "tests/test_http.py",

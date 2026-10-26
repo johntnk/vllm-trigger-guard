@@ -83,13 +83,24 @@ class BudgetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(a.inflight,0)
 
     async def test_HC16_27_cancel_admission_races(self):
-        for _ in range(100):
-            a=Admission(engine_limit=1)
-            first=await a.acquire(1,1,1)
-            waiting=asyncio.create_task(a.acquire(1,1,1));await asyncio.sleep(0)
-            a.release_engine(first);waiting.cancel()
-            with self.assertRaises(asyncio.CancelledError):await waiting
-            self.assertEqual(a.inflight,0);self.assertEqual(len(a.waiters),0)
+        for release_first in (False,True):
+            with self.subTest(release_before_cancel=release_first):
+                for _ in range(100):
+                    a=Admission(engine_limit=1)
+                    first=await a.acquire(1,1,1)
+                    waiting=asyncio.create_task(a.acquire(1,1,1));await asyncio.sleep(0)
+                    self.assertEqual(len(a.waiters),1)
+                    if release_first:a.release_engine(first)
+                    self.assertTrue(waiting.cancel())
+                    with self.assertRaises(asyncio.CancelledError):await waiting
+                    if not release_first:a.release_engine(first)
+                    self.assertTrue(waiting.cancelled())
+                    self.assertEqual(a.inflight,0);self.assertEqual(len(a.waiters),0)
+                    self.assertEqual(a.inflight_tokens,0)
+                    self.assertEqual(a.waiting_tokens,0);self.assertEqual(a.waiting_bytes,0)
+                    recovered=await a.acquire(1,1,1)
+                    a.release_engine(recovered)
+                    self.assertEqual(a.inflight,0)
 
     async def test_HC17_25_buffer_terminal_reserved_and_send_accounting(self):
         global_budget=ByteBudget(2048);buffer=OutputBuffer(global_budget,1024)
